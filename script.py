@@ -7,67 +7,52 @@ import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 
-# --- 1. एनवायरनमेंट वेरिएबल्स (GitHub Secrets से आएंगे) ---
 GOOGLE_JSON_SECRET = os.environ.get("GOOGLE_JSON_SECRET")
-# आपकी दी गई शीट की यूनिक ID
 SPREADSHEET_ID = "1NYC9vpFB17i7ErF4IoYJT0iWxchXIsQmJfGOWjarY8E" 
 
 if not GOOGLE_JSON_SECRET:
-    print("❌ Error: GOOGLE_JSON_SECRET missing in GitHub Secrets!")
+    print("❌ Error: GOOGLE_JSON_SECRET missing!")
     exit(1)
 
-# --- 2. गूगल शीट कनेक्शन ---
 try:
     creds_dict = json.loads(GOOGLE_JSON_SECRET)
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
     client = gspread.authorize(creds)
-    
-    # Welspun DSR शीट को ओपन करना
     workbook = client.open_by_key(SPREADSHEET_ID)
     sheet = workbook.worksheet("Welspun DSR")
-    print("✅ Successfully connected to 'Welspun DSR' Sheet!")
+    print("✅ Successfully connected to Google Sheets!")
 except Exception as e:
-    print(f"❌ Google Sheet Connection Error: {e}")
+    print(f"❌ Connection Error: {e}")
     exit(1)
 
-# --- 3. डेटा रीड करना ---
 all_rows = sheet.get_all_values()
 if len(all_rows) <= 1:
-    print("Sheet is empty or only contains headers.")
     exit(0)
 
-header = all_rows[0]
 data_rows = all_rows[1:]
 
-# कॉलम इंडेक्स मैपिंग (1-based index को 0-based में बदलना)
-# P=16 (SB No), Q=17 (SB Date), AB=28 (Sailing Date), AQ=43 (EGM No)
-IDX_P = 15   # Shipping Bill No
-IDX_Q = 16   # Shipping Bill Date
-IDX_AB = 27  # Vessel Sailing Date
-IDX_AQ = 42  # EGM Number Status
+IDX_P = 15   
+IDX_Q = 16   
+IDX_AB = 27  
+IDX_AQ = 42  
 
 def is_pure_number(s):
-    """जांचता है कि क्या वैल्यू सिर्फ एक शुद्ध EGM नंबर है"""
     return bool(re.match(r'^\d+$', str(s).strip()))
 
-print(f"Total rows found in sheet: {len(data_rows)}")
+# ट्रैक रखने के लिए कि पिछली रो में हमने कौन सी डेट भरी थी
+last_filled_date = ""
 
-# --- 4. ब्राउज़र ऑटोमेशन (Playwright - Chrome Engine) ---
 with sync_playwright() as p:
-    # क्रोमियम इंजन को बिना स्क्रीन (Headless) लॉन्च करना
     browser = p.chromium.launch(headless=True)
     page = browser.new_page()
     
-    print("Opening ICEGATE Public Enquiry Page...")
+    print("Opening ICEGATE Page...")
     page.goto("https://www.icegate.gov.in/Enquiry/") 
     time.sleep(4) 
 
-    # हर एक रो को स्कैन करना
     for i, row in enumerate(data_rows):
-        row_num = i + 2  # हेडर छोड़कर असली एक्सेल/शीट रो नंबर
-        
-        # सुरक्षित लंबाई सुनिश्चित करना
+        row_num = i + 2  
         while len(row) < 43:
             row.append("")
             
@@ -75,78 +60,84 @@ with sync_playwright() as p:
         egm_status = row[IDX_AQ].strip()
         sb_number = row[IDX_P].strip()
         sb_date = row[IDX_Q].strip()
-        port_code = "INMUN1" # हमेशा फिक्स Mundra Port
+        port_code = "INMUN1"
 
-        # 🛑 कंडीशन 1: अगर AB (Sailing Date) खाली है, तो स्किप करें
-        if not sailing_date:
+        if not sailing_date or (egm_status and is_pure_number(egm_status)):
             continue
 
-        # 🛑 कंडीशन 2: अगर AQ में पहले से शुद्ध नंबर वैल्यू है, तो टच नहीं करना
-        if egm_status and is_pure_number(egm_status):
-            continue
-
-        # अगर शिपिंग बिल डिटेल्स ही गायब हैं
         if not sb_number or not sb_date:
-            print(f"⚠️ Row {row_num}: Sailing Date present but SB No/Date missing. Skipping.")
             continue
 
-        # तारीख को क्रोम वाले फ़ॉर्मेट (DD-MM-YYYY) में ढालना
         clean_date = str(sb_date).replace("/", "-").replace(".", "-").strip()
         if len(clean_date) == 8 and "-" not in clean_date:
             y, m, d = clean_date[0:4], clean_date[4:6], clean_date[6:8]
-            clean_date = f"{d}-{m}-{y}"
+            clean_date = f"{d}-${m}-${y}"
 
-        print(f"🔄 Processing Row {row_num} | SB: {sb_number} | Date: {clean_date}")
+        print(f"🔄 Processing Row {row_num} | SB: {sb_number}")
 
         try:
-            # --- 💡 क्रोम एक्सटेंशन वाला हूबहू इनपुट बाईपास लॉजिक ---
-            
-            # 1. Location Selection (ng-select)
+            # लोकेटर डिफाइन करना
             loc_input = page.locator("#filter-section > div.col-lg-3.col-md-4.ds-shipping-bill-style-0 > div > div.search-box > ng-select > div > div > div.ng-input > input[type=text]")
-            loc_input.focus()
-            loc_input.click()
-            time.sleep(0.2)
-            loc_input.fill(port_code)
-            time.sleep(0.3)
-            page.keyboard.press("Enter")
-            time.sleep(0.4)
-            
-            ng_option = page.locator(".ng-option-marked, .ng-option, mat-option").first
-            if ng_option.is_visible():
-                ng_option.click()
-
-            # 2. Shipping Bill Number
             sb_input = page.locator("#filter-section > div.col-lg-3.col-md-4.ds-shipping-bill-style-2 > div > div.search-box > input")
+            date_input = page.locator("#mat-input-0")
+
+            # 🔍 स्मार्ट चेक 1: जांचें कि पोर्ट कोड बॉक्स में पहले से कुछ लिखा है या नहीं
+            # ng-select का असली वैल्यू कंटेनर ढूँढना (अगर उसमें 'INMUN1' टेक्स्ट है तो छोड़ देंगे)
+            current_port_text = page.locator("#filter-section > div.col-lg-3.col-md-4.ds-shipping-bill-style-0 > div > div.search-box > ng-select .ng-value-label").inner_text() or ""
+            
+            if port_code not in current_port_text:
+                print("📍 Port Code missing or empty, filling INMUN1...")
+                loc_input.focus()
+                loc_input.click()
+                time.sleep(0.2)
+                loc_input.fill(port_code)
+                time.sleep(0.3)
+                page.keyboard.press("Enter")
+                time.sleep(0.3)
+                ng_option = page.locator(".ng-option-marked, .ng-option, mat-option").first
+                if ng_option.is_visible():
+                    ng_option.click()
+            else:
+                print("⚡ Port Code already filled, skipping this step!")
+
+            # 2. Shipping Bill Number (यह हमेशा भरा जाएगा)
             sb_input.focus()
+            sb_input.clear() # पुराना नंबर साफ करना ज़रूरी है
+            time.sleep(0.1)
             sb_input.fill(sb_number)
             time.sleep(0.2)
 
-            # 3. Shipping Bill Date (Angular Validation Bypass)
-            date_input = page.locator("#mat-input-0")
-            date_input.focus()
-            date_input.click()
-            time.sleep(0.1)
-            date_input.fill(clean_date)
+            # 🔍 स्मार्ट चेक 2: क्या डेट पिछली वाली ही है? और क्या बॉक्स वाकई भरा हुआ है?
+            current_date_val = date_input.input_value() or ""
             
-            # एंगुलर स्टेट को 'Dirty' मार्क करने और वैल्यू लॉक करने के इवेंट्स ट्रिगर करना
-            page.keyboard.press("Enter")
-            time.sleep(0.2)
-            date_input.evaluate("el => el.dispatchEvent(new Event('input', { bubbles: true }))")
-            date_input.evaluate("el => el.dispatchEvent(new Event('change', { bubbles: true }))")
-            date_input.evaluate("el => el.blur()")
-            time.sleep(0.5)
+            if clean_date != last_filled_date or current_date_val == "":
+                print(f"📅 Date changed or empty ({clean_date}), filling...")
+                date_input.focus()
+                date_input.click()
+                time.sleep(0.1)
+                date_input.fill(clean_date)
+                page.keyboard.press("Enter")
+                time.sleep(0.2)
+                date_input.evaluate("el => el.dispatchEvent(new Event('input', { bubbles: true }))")
+                date_input.evaluate("el => el.dispatchEvent(new Event('change', { bubbles: true }))")
+                date_input.evaluate("el => el.blur()")
+                last_filled_date = clean_date # करंट डेट सेव कर लें
+            else:
+                print("⚡ Date is same as previous, skipping date fill!")
 
-            # 4. Click Search Button
+            time.sleep(0.3)
+
+            # 3. Click Search Button
             search_btn = page.locator("button:has-text('Search'), button.search, button[type='submit']").first
             if search_btn.is_visible():
                 search_btn.click()
             else:
                 page.keyboard.press("Enter")
 
-            # --- 5. स्मार्ट वेटिंग फॉर टैब्स (12 सेकंड तक होल्ड) ---
+            # --- 4. स्मार्ट वेटिंग फॉर टैब्स ---
             legm_tab = None
-            for _ in range(30):
-                time.sleep(0.4)
+            for _ in range(25): # अब वेट थोड़ा छोटा कर दिया क्योंकि पेज रीलोड नहीं हो रहा
+                time.sleep(0.3)
                 tabs = page.locator(".mat-tab-label, .mat-mdc-tab, [role='tab'], .mat-tab-links a")
                 if tabs.count() >= 4:
                     legm_tab = tabs.nth(3)
@@ -162,11 +153,10 @@ with sync_playwright() as p:
             if not legm_tab:
                 raise Exception("Timeout / Tabs Missing")
 
-            # LEGM Status पर क्लिक और डेटा लोड वेट
             legm_tab.click()
-            time.sleep(1.5)
+            time.sleep(1.2)
 
-            # --- 6. डेटा एक्सट्रैक्शन लूप ---
+            # --- 5. डेटा एक्सट्रैक्शन ---
             egm_value = "N.A."
             target_rows = page.locator(".mat-tab-body-active table tr, .mat-mdc-tab-body-active mat-row, table tr, mat-row")
             
@@ -178,17 +168,18 @@ with sync_playwright() as p:
                         egm_value = text
                         break
 
-            # गूगल शीट की कॉलम AQ (43वीं कॉलम) में लाइव सेव करना
             sheet.update_cell(row_num, 43, egm_value)
-            print(f"🎯 Success! Row {row_num} updated: {egm_value}")
+            print(f"🎯 Row {row_num} Updated Success: {egm_value}")
 
         except Exception as err:
             err_msg = str(err)
             clean_err = "Timeout / Slow" if "Timeout" in err_msg or "Tabs" in err_msg else "Fields Missing"
             print(f"❌ Row {row_num} Failed: {clean_err}")
-            
-            # एरर होने पर भी टेक्स्ट AQ में लिखना ताकि कल दोबारा री-ट्राई हो सके
             sheet.update_cell(row_num, 43, clean_err)
+            
+            # एरर आने पर हो सकता है पेज क्रैश हुआ हो या पॉपअप आया हो, इसलिए सेफ साइड रहने के लिए
+            # अगली रो में हम दोबारा पोर्ट और डेट भरेंगे
+            last_filled_date = "" 
             
             try:
                 close_btn = page.locator(".toast-close-button, alert button, .close").first
@@ -197,8 +188,8 @@ with sync_playwright() as p:
             except:
                 pass
 
-        # सरकारी सर्वर सुरक्षा के लिए 4 से 6 सेकंड का सेफ डिले
-        time.sleep(random.uniform(4.0, 6.0))
+        # क्योंकि अब लोड कम है, डिले को भी थोड़ा कम (3 से 4 सेकंड) कर सकते हैं
+        time.sleep(random.uniform(3.0, 4.0))
 
     browser.close()
-print("🎉 All eligible rows processed and Google Sheet is updated!")
+print("🎉 Process Completed!")
