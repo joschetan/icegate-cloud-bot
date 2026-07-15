@@ -53,7 +53,7 @@ with sync_playwright() as p:
 
     print("🚀 Opening ICEGATE Official Portal...")
     page.goto("https://foservices.icegate.gov.in/#/public-enquiries/document-status/ds-shipping-bill", wait_until="networkidle") 
-    time.sleep(4) 
+    time.sleep(9) 
 
     for i, row in enumerate(data_rows):
         row_num = i + 2  
