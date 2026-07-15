@@ -10,11 +10,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    # ⚡ बदलाव: ऐक्शन्स को नए वर्जन्स पर सेट कर दिया ताकि Node.js की वार्निंग गायब हो जाए
     - name: Checkout Code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v4.2.2
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v5.3.0
       with:
         python-version: '3.10'
 
