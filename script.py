@@ -1,131 +1,195 @@
 import os
-import re
 import time
 import json
-import requests
+import random
+import re
+import gspread
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
+from playwright.sync_api import sync_playwright
 
-# 📊 Google Sheet Configuration
-SPREADSHEET_ID = '1NYC9vpFB17i7ErF4IoYJT0iWxchXIsQmJfGOWjarY8E'
-SHEET_NAME = 'Welspun DSR'
+GOOGLE_JSON_SECRET = os.environ.get("GOOGLE_JSON_SECRET")
+SPREADSHEET_ID = "1NYC9vpFB17i7ErF4IoYJT0iWxchXIsQmJfGOWjarY8E" 
 
-def get_google_sheet_service():
-    scopes = ['https://www.googleapis.com/auth/spreadsheets']
-    # स्थानीय क्रेडेंशियल्स या गITHUB SECRETS से टोकन उठाना
-    creds_json = os.environ.get('GOOGLE_CREDENTIALS')
-    if creds_json:
-        creds = Credentials.from_service_account_info(json.loads(creds_json), scopes=scopes)
-    elif os.path.exists('credentials.json'):
-        creds = Credentials.from_service_account_file('credentials.json', scopes=scopes)
-    else:
-        raise Exception("Google Credentials JSON not found in environment or file!")
-    return build('sheets', 'v4', credentials=creds)
+if not GOOGLE_JSON_SECRET:
+    print("❌ Error: GOOGLE_JSON_SECRET missing!")
+    exit(1)
 
-def fetch_egm_from_icegate_cloud(sb_no, sb_date):
-    """
-    यह फंक्शन सीधे ICEGATE के पब्लिक एंडपॉइंट को हिट करता है।
-    क्लाउडफ्लेयर ब्लॉकिंग और टाइमआउट से बचने के लिए इसमें सख्त 15 सेकंड का टाइमआउट है।
-    """
-    url = f"https://foservices.icegate.gov.in/fe-proxy/documentStatus/getSbEgmStatus"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "sbNo": str(sb_no).strip(),
-        "sbDate": str(sb_date).strip(),
-        "portCode": "INMUN1" # डिफ़ॉल्ट मुंद्रा, आवश्यकतानुसार आप बदल सकते हैं
-    }
+try:
+    creds_dict = json.loads(GOOGLE_JSON_SECRET)
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+    client = gspread.authorize(creds)
+    workbook = client.open_by_key(SPREADSHEET_ID)
+    sheet = workbook.worksheet("Welspun DSR")
+    print("✅ Successfully connected to Google Sheets!")
+except Exception as e:
+    print(f"❌ Connection Error: {e}")
+    exit(1)
+
+all_rows = sheet.get_all_values()
+if len(all_rows) <= 1:
+    exit(0)
+
+data_rows = all_rows[1:]
+
+IDX_P = 15   
+IDX_Q = 16   
+IDX_AB = 27  
+IDX_AQ = 42  
+
+def is_pure_number(s):
+    return bool(re.match(r'^\d+$', str(s).strip()))
+
+# ट्रैक रखने के लिए कि पिछली रो में हमने कौन सी डेट भरी थी
+last_filled_date = ""
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page()
     
-    # ⚡ टाइमआउट को रोकने के लिए सख्त 15 सेकंड लिमिट
-    response = requests.post(url, json=payload, headers=headers, timeout=15)
-    if response.status_code == 200:
-        res_data = response.json()
-        # मान लेते हैं कि API रिपॉन्स में 'egmNo' फ़ील्ड आती है
-        return res_data.get('egmNo', 'N.A.')
-    return "N.A."
+    print("Opening ICEGATE Page...")
+    page.goto("https://www.icegate.gov.in/Enquiry/") 
+    time.sleep(4) 
 
-def main():
-    try:
-        print("🚀 Cloud Bot Started. Fetching Google Sheet data...")
-        service = get_google_sheet_service()
-        sheet = service.spreadsheets()
-        
-        range_name = f"'{SHEET_NAME}'!A:AQ"
-        result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range=range_name).execute()
-        rows = result.get('values', [])
-        
-        if not rows:
-            print("❌ Empty sheet or no data found.")
-            return
-
-        # 0-indexed कॉलम सेटिंग्स (P=15, Q=16, AB=27, AQ=42)
-        COL_SB_NO = 15    
-        COL_SB_DATE = 16  
-        COL_SAILING = 27  
-        COL_EGM_NO = 42   
-
-        for index, row in enumerate(rows):
-            if index == 0: # हेडर स्किप करें
-                continue
-                
-            # इंडेक्स एरर से बचने के लिए रो की लेंथ पैड करना
-            while len(row) < 43:
-                row.append("")
-
-            sb_no = str(row[COL_SB_NO]).strip()
-            sb_date = str(row[COL_SB_DATE]).strip()
-            sailing_date = str(row[COL_SAILING]).strip()
-            egm_value = str(row[COL_EGM_NO]).strip()
-
-            # 🔒 रूल वैलिडेशन चेक
-            if not sb_no or sb_no.upper() == "N.A.":
-                continue
-            if not sailing_date or sailing_date.upper() == "N.A.":
-                continue
-            if egm_value and re.search(r'\d', egm_value):
-                continue
-
-            print(f"➔ Processing Row {index + 1}: SB {sb_no}")
+    for i, row in enumerate(data_rows):
+        row_num = i + 2  
+        while len(row) < 43:
+            row.append("")
             
-            # 🛡️ सुपर सेफ्टी: यहाँ ट्राई-एक्सेप्ट लगाया है ताकि कोई भी सिंगल रो पूरे बोट को क्रैश (Exit code 1) न कर पाए
-            extracted_egm = "N.A."
+        sailing_date = row[IDX_AB].strip()
+        egm_status = row[IDX_AQ].strip()
+        sb_number = row[IDX_P].strip()
+        sb_date = row[IDX_Q].strip()
+        port_code = "INMUN1"
+
+        if not sailing_date or (egm_status and is_pure_number(egm_status)):
+            continue
+
+        if not sb_number or not sb_date:
+            continue
+
+        clean_date = str(sb_date).replace("/", "-").replace(".", "-").strip()
+        if len(clean_date) == 8 and "-" not in clean_date:
+            y, m, d = clean_date[0:4], clean_date[4:6], clean_date[6:8]
+            clean_date = f"{d}-${m}-${y}"
+
+        print(f"🔄 Processing Row {row_num} | SB: {sb_number}")
+
+        try:
+            # लोकेटर डिफाइन करना
+            loc_input = page.locator("#filter-section > div.col-lg-3.col-md-4.ds-shipping-bill-style-0 > div > div.search-box > ng-select > div > div > div.ng-input > input[type=text]")
+            sb_input = page.locator("#filter-section > div.col-lg-3.col-md-4.ds-shipping-bill-style-2 > div > div.search-box > input")
+            date_input = page.locator("#mat-input-0")
+
+            # 🔍 स्मार्ट चेक 1: जांचें कि पोर्ट कोड बॉक्स में पहले से कुछ लिखा है या नहीं
+            # ng-select का असली वैल्यू कंटेनर ढूँढना (अगर उसमें 'INMUN1' टेक्स्ट है तो छोड़ देंगे)
+            current_port_text = page.locator("#filter-section > div.col-lg-3.col-md-4.ds-shipping-bill-style-0 > div > div.search-box > ng-select .ng-value-label").inner_text() or ""
+            
+            if port_code not in current_port_text:
+                print("📍 Port Code missing or empty, filling INMUN1...")
+                loc_input.focus()
+                loc_input.click()
+                time.sleep(0.2)
+                loc_input.fill(port_code)
+                time.sleep(0.3)
+                page.keyboard.press("Enter")
+                time.sleep(0.3)
+                ng_option = page.locator(".ng-option-marked, .ng-option, mat-option").first
+                if ng_option.is_visible():
+                    ng_option.click()
+            else:
+                print("⚡ Port Code already filled, skipping this step!")
+
+            # 2. Shipping Bill Number (यह हमेशा भरा जाएगा)
+            sb_input.focus()
+            sb_input.clear() # पुराना नंबर साफ करना ज़रूरी है
+            time.sleep(0.1)
+            sb_input.fill(sb_number)
+            time.sleep(0.2)
+
+            # 🔍 स्मार्ट चेक 2: क्या डेट पिछली वाली ही है? और क्या बॉक्स वाकई भरा हुआ है?
+            current_date_val = date_input.input_value() or ""
+            
+            if clean_date != last_filled_date or current_date_val == "":
+                print(f"📅 Date changed or empty ({clean_date}), filling...")
+                date_input.focus()
+                date_input.click()
+                time.sleep(0.1)
+                date_input.fill(clean_date)
+                page.keyboard.press("Enter")
+                time.sleep(0.2)
+                date_input.evaluate("el => el.dispatchEvent(new Event('input', { bubbles: true }))")
+                date_input.evaluate("el => el.dispatchEvent(new Event('change', { bubbles: true }))")
+                date_input.evaluate("el => el.blur()")
+                last_filled_date = clean_date # करंट डेट सेव कर लें
+            else:
+                print("⚡ Date is same as previous, skipping date fill!")
+
+            time.sleep(0.3)
+
+            # 3. Click Search Button
+            search_btn = page.locator("button:has-text('Search'), button.search, button[type='submit']").first
+            if search_btn.is_visible():
+                search_btn.click()
+            else:
+                page.keyboard.press("Enter")
+
+            # --- 4. स्मार्ट वेटिंग फॉर टैब्स ---
+            legm_tab = None
+            for _ in range(25): # अब वेट थोड़ा छोटा कर दिया क्योंकि पेज रीलोड नहीं हो रहा
+                time.sleep(0.3)
+                tabs = page.locator(".mat-tab-label, .mat-mdc-tab, [role='tab'], .mat-tab-links a")
+                if tabs.count() >= 4:
+                    legm_tab = tabs.nth(3)
+                    break
+
+            if not legm_tab:
+                elements = page.locator("div, span, a")
+                for j in range(elements.count()):
+                    if elements.nth(j).inner_text().strip().upper() == "LEGM STATUS":
+                        legm_tab = elements.nth(j)
+                        break
+
+            if not legm_tab:
+                raise Exception("Timeout / Tabs Missing")
+
+            legm_tab.click()
+            time.sleep(1.2)
+
+            # --- 5. डेटा एक्सट्रैक्शन ---
+            egm_value = "N.A."
+            target_rows = page.locator(".mat-tab-body-active table tr, .mat-mdc-tab-body-active mat-row, table tr, mat-row")
+            
+            for j in range(target_rows.count()):
+                cells = target_rows.nth(j).locator("td, mat-cell, .mat-mdc-cell")
+                if cells.count() > 0:
+                    text = cells.nth(0).inner_text().strip()
+                    if text != "" and "EGM NO" not in text.upper() and "LOADING" not in text.upper():
+                        egm_value = text
+                        break
+
+            sheet.update_cell(row_num, 43, egm_value)
+            print(f"🎯 Row {row_num} Updated Success: {egm_value}")
+
+        except Exception as err:
+            err_msg = str(err)
+            clean_err = "Timeout / Slow" if "Timeout" in err_msg or "Tabs" in err_msg else "Fields Missing"
+            print(f"❌ Row {row_num} Failed: {clean_err}")
+            sheet.update_cell(row_num, 43, clean_err)
+            
+            # एरर आने पर हो सकता है पेज क्रैश हुआ हो या पॉपअप आया हो, इसलिए सेफ साइड रहने के लिए
+            # अगली रो में हम दोबारा पोर्ट और डेट भरेंगे
+            last_filled_date = "" 
+            
             try:
-                # लाइव क्लाउड फेचिंग मेथड चालू करना
-                extracted_egm = fetch_egm_from_icegate_cloud(sb_no, sb_date)
-                if not extracted_egm or extracted_egm == "N.A.":
-                    extracted_egm = "N.A. (Check Portal)"
-            except requests.exceptions.Timeout:
-                print(f"   ⚠️ Timeout on row {index + 1}. Skipping to save workflow.")
-                extracted_egm = "Timeout / Slow"
-            except Exception as row_err:
-                print(f"   ⚠️ Row Error: {str(row_err)}")
-                extracted_egm = "Fetch Error"
+                close_btn = page.locator(".toast-close-button, alert button, .close").first
+                if close_btn.is_visible():
+                    close_btn.click()
+            except:
+                pass
 
-            # 📝 सीधे लाइव Google Sheet में राइट (अपडेट) करना
-            try:
-                update_range = f"'{SHEET_NAME}'!AQ{index + 1}"
-                body = {'values': [[extracted_egm]]}
-                sheet.values().update(
-                    spreadsheetId=SPREADSHEET_ID,
-                    range=update_range,
-                    valueInputOption='RAW',
-                    body=body
-                ).execute()
-                print(f"   ✅ AQ{index + 1} updated with: {extracted_egm}")
-            except Exception as write_err:
-                print(f"   ❌ Sheet write failed at row {index + 1}: {str(write_err)}")
+        # क्योंकि अब लोड कम है, डिले को भी थोड़ा कम (3 से 4 सेकंड) कर सकते हैं
+        time.sleep(random.uniform(3.0, 4.0))
 
-            # गिटहब एक्शन्स पर ब्लॉक होने से बचने के लिए सेफ़ डिले
-            time.sleep(3)
-
-        print("\n🎉 Master Process Safely Finished without crashes!")
-
-    except Exception as master_err:
-        # अगर मास्टर क्रेडेंशियल में ही लोचा हुआ, तो ही लॉग प्रिंट होगा
-        print(f"❌ Critical Master Error: {str(master_err)}")
-
-if __name__ == "__main__":
-    main()
+    browser.close()
+print("🎉 Process Completed!")
