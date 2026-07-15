@@ -40,16 +40,18 @@ IDX_AQ = 42
 def is_pure_number(s):
     return bool(re.match(r'^\d+$', str(s).strip()))
 
+# ग्लोबल ट्रैकिंग वेरिएबल्स (यह लूप के बाहर रहेंगे ताकि बोट को याद रहे)
+is_port_filled = False
 last_filled_date = ""
 
 with sync_playwright() as p:
-    # GitHub Actions रनर के लिए हेडलेस क्रोमियम लॉन्च करना
     browser = p.chromium.launch(headless=True)
     page = browser.new_page()
     
-    print("Opening ICEGATE Page...")
-    page.goto("https://foservices.icegate.gov.in/#/public-enquiries/document-status/ds-shipping-bill") 
-    time.sleep(5) 
+    print("🚀 Opening ICEGATE Page...")
+    # wait_until="commit" लगाने से भारी-भरकम एक्स्ट्रा स्क्रिप्ट्स के लोड होने का इंतज़ार नहीं करना पड़ेगा
+    page.goto("https://foservices.icegate.gov.in/#/public-enquiries/document-status/ds-shipping-bill", wait_until="commit", timeout=20000) 
+    time.sleep(4) 
 
     for i, row in enumerate(data_rows):
         row_num = i + 2  
@@ -60,32 +62,31 @@ with sync_playwright() as p:
         egm_status = row[IDX_AQ].strip()
         sb_number = row[IDX_P].strip()
         sb_date = row[IDX_Q].strip()
-        port_code = "INMUN1"
+        port_code = "INMUN1" # फिक्स्ड मुंद्रा पोर्ट
 
-        # 🔒 आपकी कंडीशंस के अनुसार फ़िल्टर
+        # 🔒 शर्त जाँच
         if not sailing_date or (egm_status and is_pure_number(egm_status)):
             continue
 
         if not sb_number or not sb_date:
             continue
 
-        # 📅 डेट फॉर्मेटिंग फिक्स (फॉरवर्ड स्लैश / डॉट हटाकर सही करना)
+        # 📅 डेट क्लीनिंग फ़िक्स
         clean_date = str(sb_date).replace("/", "-").replace(".", "-").strip()
         if len(clean_date) == 8 and "-" not in clean_date:
             y, m, d = clean_date[0:4], clean_date[4:6], clean_date[6:8]
-            clean_date = f"{d}-{m}-{y}" # $ का सिंबल हटा दिया भाई
+            clean_date = f"{d}-{m}-{y}"
 
-        print(f"🔄 Processing Row {row_num} | SB: {sb_number} | Date: {clean_date}")
+        print(f"\n🔄 Processing Row {row_num} | SB: {sb_number} | Target Date: {clean_date}")
 
         try:
             loc_input = page.locator("#filter-section > div.col-lg-3.col-md-4.ds-shipping-bill-style-0 > div > div.search-box > ng-select > div > div > div.ng-input > input[type=text]")
             sb_input = page.locator("#filter-section > div.col-lg-3.col-md-4.ds-shipping-bill-style-2 > div > div.search-box > input")
             date_input = page.locator("#mat-input-0")
 
-            # 📍 पोर्ट कोड डालना
-            current_port_text = page.locator("#filter-section > div.col-lg-3.col-md-4.ds-shipping-bill-style-0 ng-select .ng-value-label").inner_text() or ""
-            
-            if port_code not in current_port_text:
+            # 📍 1. मुंद्रा पोर्ट भरने का नियम: पूरी स्क्रिप्ट में सिर्फ पहली बार भरा जाएगा!
+            if not is_port_filled:
+                print("📍 Port (INMUN1) filling for the first time...")
                 loc_input.focus()
                 loc_input.click()
                 time.sleep(0.2)
@@ -96,17 +97,22 @@ with sync_playwright() as p:
                 ng_option = page.locator(".ng-option-marked, .ng-option, mat-option").first
                 if ng_option.is_visible():
                     ng_option.click()
+                is_port_filled = True # अब ये हमेशा के लिए True हो गया, दोबारा लूप में यहाँ नहीं आएगा
+                time.sleep(0.2)
+            else:
+                print("⚡ Port (INMUN1) already locked on portal, skipping!")
 
-            # 🔢 शिपिंग बिल डालना
+            # 🔢 2. Shipping Bill Number (यह हमेशा हर रो में नया भरा जाएगा)
             sb_input.focus()
             sb_input.clear()
-            time.sleep(0.2)
+            time.sleep(0.1)
             sb_input.fill(sb_number)
-            time.sleep(0.2)
+            time.sleep(0.1)
 
-            # 📅 डेट इनपुट डालना
+            # 📅 3. डेट भरने का नियम: केवल तब भरो जब डेट पिछली वाली रो से अलग हो!
             current_date_val = date_input.input_value() or ""
             if clean_date != last_filled_date or current_date_val == "":
+                print(f"📅 Date changed or empty ({clean_date}), filling new date...")
                 date_input.focus()
                 date_input.click()
                 time.sleep(0.2)
@@ -116,35 +122,40 @@ with sync_playwright() as p:
                 date_input.evaluate("el => el.dispatchEvent(new Event('input', { bubbles: true }))")
                 date_input.evaluate("el => el.dispatchEvent(new Event('change', { bubbles: true }))")
                 date_input.evaluate("el => el.blur()")
-                last_filled_date = clean_date
+                last_filled_date = clean_date # नई डेट याद कर लो
+            else:
+                print("⚡ Date is same as previous row, skipping date fill!")
 
-            time.sleep(0.3)
+            time.sleep(0.2)
 
-            # 🔍 सर्च बटन दबाना
+            # 🔍 4. क्लिक सर्च बटन
             search_btn = page.locator("button:has-text('Search'), button.search, button[type='submit']").first
             if search_btn.is_visible():
                 search_btn.click()
             else:
                 page.keyboard.press("Enter")
 
-            # ⏳ पोलिंग लूप: आपके दिए गए अचूक कंबाइंड JS Paths का उपयोग करके
+            # ⏳ 5. डेटा एक्सट्रैक्शन पोलिंग लूप (आपके दोनों डायरेक्ट JS Paths का उपयोग करके)
             egm_value = "N.A."
-            table_loaded = false
+            table_loaded = False
             
-            for attempt in range(60): # 12 सेकंड तक टेबल लोड होने का इंतज़ार करेगा
+            # सर्च के बाद डेटा रिफ्रेश होने के लिए छोटा सा सेफ्टी होल्ड
+            time.sleep(0.5)
+
+            for attempt in range(40): # अधिकतम 8 सेकंड इंतज़ार करेगा
                 time.sleep(0.2)
                 
-                # 🎯 आपके दिए गए अचूक JS Path से "LEGM Status" (4th Tab) बटन को क्लिक फ़ोर्स करें
-                # #tablerecords > div.row.row-border.tabindex.ds-shipping-bill-style-7 > button:nth-child(4)
+                # 🎯 आपके दिए गए EGM बटन का सटीक JS Path (4th Tab)
                 egm_tab_button = page.locator("#tablerecords > div.row.row-border.tabindex.ds-shipping-bill-style-7 > button:nth-child(4)")
                 if egm_tab_button.is_visible():
                     egm_tab_button.click()
 
-                # 🎯 आपके दिए गए दूसरे अचूक JS Path से सीधे EGM No वाली सेल को टारगेट करें
-                egm_cell = page.locator("#tablerecords > div.row.sb-table.table-responsive.ds-shipping-bill-style-103.ng-star-inserted > table > tbody > tr > td.mat-cell.cdk-cell.ds-shipping-bill-style-105.cdk-column-egmNo.mat-column-egmNo.ng-star-inserted")
+                # 🎯 आपके दिए गए EGM No. डेटा सेल का सटीक JS Path[cite: 1]
+                egm_cell = page.locator("#tablerecords > div.row.sb-table.table-responsive.ds-shipping-bill-style-103.ng-star-inserted > table > tbody > tr > td.mat-cell.cdk-cell.ds-shipping-bill-style-105.cdk-column-egmNo.mat-column-egmNo.ng-star-inserted")[cite: 1]
                 
                 if egm_cell.is_visible():
                     text_val = egm_cell.inner_text().strip()
+                    # पक्का करें कि वैल्यू खाली, LOADING या हेडर टेक्स्ट न हो
                     if text_val != "" and "LOADING" not in text_val.upper() and "EGM NO" not in text_val.upper():
                         egm_value = text_val
                         table_loaded = True
@@ -153,7 +164,7 @@ with sync_playwright() as p:
             if not table_loaded:
                 raise Exception("Timeout / Table Missing")
 
-            # 📝 सीधे लाइव Google Sheet में AQ कॉलम को अपडेट करना
+            # 📝 सीधे Google Sheet में लाइव AQ कॉलम को अपडेट करना
             sheet.update_cell(row_num, 43, egm_value)
             print(f"🎯 Row {row_num} Updated Success: {egm_value}")
 
@@ -163,7 +174,11 @@ with sync_playwright() as p:
             print(f"❌ Row {row_num} Failed: {clean_err}")
             sheet.update_cell(row_num, 43, clean_err)
             
+            # एरर आने पर हो सकता है वेबसाइट रिसेट हुई हो, इसलिए सेफ साइड रहने के लिए
+            # अगली रो में पोर्ट और डेट दोबारा चेक करने देंगे
+            is_port_filled = False
             last_filled_date = "" 
+            
             try:
                 close_btn = page.locator(".toast-close-button, alert button, .close").first
                 if close_btn.is_visible():
@@ -171,7 +186,8 @@ with sync_playwright() as p:
             except:
                 pass
 
-        time.sleep(random.uniform(3.0, 4.5))
+        # रो के बीच रैंडम डिले (सर्वर ब्लॉकिंग से बचने के लिए)
+        time.sleep(random.uniform(2.5, 3.5))
 
     browser.close()
-print("🎉 Process Completed Finished!")
+print("🎉 Cloud Auto-Bot Process Completed Successfully!")
