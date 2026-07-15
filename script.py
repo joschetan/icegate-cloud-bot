@@ -25,9 +25,19 @@ except Exception as e:
     print(f"❌ BRIDGE STEP 1 FAILED: Cannot connect to Google Sheet. Error: {e}")
     exit(1)
 
+# ➔ [🎯 NEW STEP]: सबसे पहले सीधे AQ2 सेल में "HI TEST" लिखकर चेक करना
+try:
+    print("📝 Attempting direct write test... Writing 'HI TEST' to AQ2...")
+    # gspread में सीधे (row, col, value) पास किया जाता है, row_num नाम का पैरामीटर नहीं होता
+    sheet.update_cell(2, 43, "HI TEST")
+    print("🎯 DIRECT WRITE SUCCESS: 'HI TEST' successfully written to AQ2!")
+    time.sleep(2) # 2 सेकंड का होल्ड
+except Exception as e:
+    print(f"❌ DIRECT WRITE FAILED: Could not write directly to sheet. Error: {e}")
+
 # ➔ चरण 2: किसी दूसरी पब्लिक वेबसाइट से डेटा कॉपी करने का टेस्ट
 with sync_playwright() as p:
-    print("🌐 Launching Chromium in Headless Mode...")
+    print("\n🌐 Launching Chromium in Headless Mode...")
     browser = p.chromium.launch(headless=True)
     page = browser.new_page()
     
@@ -46,14 +56,14 @@ with sync_playwright() as p:
         print(f"❌ BRIDGE STEP 2 FAILED: Could not load website or copy text. Error: {e}")
         extracted_text = "Website Fetch Error"
 
-    # ➔ चरण 3: कॉपी किए गए डेटा को Google Sheet की AQ2 सेल में लिखने का टेस्ट
+    # ➔ चरण 3: कॉपी किए गए डेटा को Google Sheet की AQ2 सेल में ओवरराइट करने का टेस्ट
     try:
-        print("📝 Attempting to write copied data into Google Sheet column AQ2...")
-        # रो 2 (पहली डेटा रो), कॉलम 43 (AQ Column) को सीधे अपडेट करना
-        sheet.update_cell(row_num=2, col=43, value=extracted_text)
-        print(f"🎯 BRIDGE STEP 3 SUCCESS: Google Sheet cell AQ2 updated with value: '{extracted_text}'")
+        print("📝 Attempting to write copied website text into Google Sheet column AQ2...")
+        # फिक्स: पैरामीटर नेम हटाकर डायरेक्ट रो और कॉलम नंबर दिया है
+        sheet.update_cell(2, 43, extracted_text)
+        print(f"🎯 BRIDGE STEP 3 SUCCESS: Google Sheet cell AQ2 updated with website value: '{extracted_text}'")
     except Exception as e:
-        print(f"❌ BRIDGE STEP 3 FAILED: Connected to sheet, but writing failed. Error: {e}")
+        print(f"❌ BRIDGE STEP 3 FAILED: Connected to sheet, but website text writing failed. Error: {e}")
 
     browser.close()
 
